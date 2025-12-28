@@ -4,6 +4,7 @@ import json
 import os
 import base64
 import re
+import tempfile
 from datetime import datetime
 
 
@@ -33,12 +34,6 @@ class ImageGen(AopUtil):
                             default=False,
                             help_text='Indicates if image generation is in progress',
                             order=0)
-        
-        # Create Model parameter with default value
-        self.create_parameter('Model', 'str', page='Config',
-                            label='Model',
-                            default='google/nano-banana-pro',
-                            help_text='AI model to use for image generation')
         
         # Create Aspect Ratio parameter (menu based on API docs)
         aspect_ratio_options = ['21:9', '1:1', '4:3', '3:2', '2:3', '5:4', '4:5', '3:4', '16:9', '9:16']
@@ -70,6 +65,83 @@ class ImageGen(AopUtil):
         self.create_parameter('Clearfiles', 'pulse', page='Config',
                             label='Clear Files',
                             help_text='Clear all entries from SAVED_FILES table')
+
+    def _detect_model(self):
+        """
+        Detect which model to use based on reference image availability.
+        
+        Returns:
+            str: 'google/nano-banana-pro-edit' if reference images found, 
+                 'google/nano-banana-pro' otherwise
+        """
+        ref_in1_resized = self.ownerComp.op('REF_IN1_')
+        if ref_in1_resized:
+            width, height = ref_in1_resized.width, ref_in1_resized.height
+            if width != 128 or height != 128:
+                return 'google/nano-banana-pro-edit'
+        return 'google/nano-banana-pro'
+    
+    def _collect_reference_images(self):
+        """
+        Collect and encode reference images from REF_IN operators.
+        Checks REF_IN1_, REF_IN2_, etc. (up to 14 images as per API limit).
+        
+        Returns:
+            list: List of base64-encoded image data URIs, empty if none found
+        """
+        image_urls = []
+        max_images = 14  # API limit
+        
+        for i in range(1, max_images + 1):
+            # Check the resized version first
+            ref_resized = self.ownerComp.op(f'REF_IN{i}_')
+            if not ref_resized:
+                continue
+            
+            # Check if it's not empty (128x128 means empty)
+            if ref_resized.width == 128 and ref_resized.height == 128:
+                continue
+            
+            # Get the non-resized version
+            ref_image = self.ownerComp.op(f'REF_IN{i}')
+            if not ref_image:
+                continue
+            
+            try:
+                # Save to temporary file
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                # Save the image from TOP operator
+                ref_image.save(temp_path)
+                
+                # Read and encode to base64
+                with open(temp_path, 'rb') as f:
+                    image_bytes = f.read()
+                    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+                
+                # Format as data URI
+                data_uri = f'data:image/png;base64,{encoded_image}'
+                image_urls.append(data_uri)
+                
+                # Clean up temp file
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                
+                self.logger.log(f"Collected reference image from REF_IN{i}", level='INFO')
+                
+            except Exception as e:
+                self.logger.log(f"Error processing REF_IN{i}: {e}", level='ERROR')
+                # Clean up temp file on error
+                try:
+                    if 'temp_path' in locals():
+                        os.unlink(temp_path)
+                except:
+                    pass
+        
+        return image_urls
 
     def _generate_filename(self, prompt, output_dir):
         """
@@ -119,6 +191,11 @@ class ImageGen(AopUtil):
                     self.logger.log("Set Scroll cursor to 0", level='INFO')
                 
                 self.logger.log("Cleared SAVED_FILES table and added empty row", level='INFO')
+                
+                # Clear logs like Logger.clearlog pulse
+                logger_op = op('Logger')
+                if logger_op and hasattr(logger_op.ext.Logger, 'Clearlog'):
+                    logger_op.ext.Logger.Clearlog()
             else:
                 self.logger.log("SAVED_FILES table operator not found", level='WARNING')
         except Exception as e:
@@ -157,7 +234,7 @@ class ImageGen(AopUtil):
         except Exception as e:
             self.logger.log(f"Error adding to SAVED_FILES table: {e}", level='ERROR')
 
-    async def _generate_image_async(self, prompt, model, output_dir, aspect_ratio, resolution):
+    async def _generate_image_async(self, prompt, model, output_dir, aspect_ratio, resolution, image_urls=None):
         """
         Async method to generate an image from the AIMLAPI.
         
@@ -167,6 +244,7 @@ class ImageGen(AopUtil):
             output_dir (str): Directory to save the generated image
             aspect_ratio (str): Image aspect ratio
             resolution (str): Image resolution
+            image_urls (list, optional): List of base64-encoded image data URIs for editing mode
             
         Returns:
             str: Path to the saved image file, or None if failed
@@ -184,13 +262,19 @@ class ImageGen(AopUtil):
                 'num_images': 1
             }
             
+            # Add image_urls if provided (for editing mode)
+            if image_urls and len(image_urls) > 0:
+                payload['image_urls'] = image_urls
+            
             # Set the headers
             headers = {
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json'
             }
             
-            self.logger.log(f"Generating image with prompt: '{prompt}'", level='INFO')
+            # Truncate prompt for logging (don't log whole prompt)
+            prompt_preview = prompt[:50] + '...' if len(prompt) > 50 else prompt
+            self.logger.log(f"Generating image with prompt: '{prompt_preview}'", level='INFO')
             self.logger.log(f"Using model: {model}", level='INFO')
             
             # Make the async POST request
@@ -264,14 +348,14 @@ class ImageGen(AopUtil):
             self.logger.log(error_msg, level='ERROR')
             return None
 
-    def Generate(self, prompt=None, model=None, output_dir=None, aspect_ratio=None, resolution=None, completion_callback=None):
+    def Generate(self, prompt=None, output_dir=None, aspect_ratio=None, resolution=None, completion_callback=None):
         """
         Generate an image using the AIMLAPI asynchronously.
         Can be called from the pulse button (no args) or programmatically (with args).
+        Automatically detects model based on reference image availability.
         
         Args:
             prompt (str, optional): Text prompt. If None, uses op("PROMPT").text from the PROMPT operator
-            model (str, optional): Model name. If None, uses self.ownerComp.par.Model
             output_dir (str, optional): Output directory. If None, uses op.AOP.par.Outputdir (global setting)
             aspect_ratio (str, optional): Aspect ratio. If None, uses self.ownerComp.par.Aspectratio
             resolution (str, optional): Resolution. If None, uses self.ownerComp.par.Resolution
@@ -291,7 +375,12 @@ class ImageGen(AopUtil):
                 self.logger.log(error_msg, level='ERROR')
                 raise ValueError(error_msg)
         
-        model = model if model is not None else self.ownerComp.par.Model.eval()
+        # Auto-detect model based on reference images
+        model = self._detect_model()
+        
+        # Collect reference images if available
+        image_urls = self._collect_reference_images()
+        
         # Get output directory from global AOP parameter
         if output_dir is None:
             output_dir = op.AOP.par.Outputdir.eval()
@@ -310,13 +399,13 @@ class ImageGen(AopUtil):
                 completion_callback(task)
         
         # Create the async coroutine
-        coro = self._generate_image_async(prompt, model, output_dir, aspect_ratio, resolution)
+        coro = self._generate_image_async(prompt, model, output_dir, aspect_ratio, resolution, image_urls)
         
         # Run it through the async manager
         task_id = self.tdAsyncIO.ext.AsyncIOManager.Run(
             coro,
             description=f"Generate Image: {prompt[:50]}...",
-            info={'prompt': prompt, 'model': model, 'output_dir': output_dir},
+            info={'prompt': prompt[:50] + '...' if len(prompt) > 50 else prompt, 'model': model, 'output_dir': output_dir},
             completion_callback=on_completion
         )
         
