@@ -5,6 +5,7 @@ Provides common functionality for ImageGen and VideoGen classes.
 """
 
 from AopUtil import AopUtil
+from models_registry import extract_provider_from_model_id, get_models_by_provider, get_registry
 import os
 import base64
 import re
@@ -89,6 +90,37 @@ class MediaGenBase(AopUtil):
             return width != 128 or height != 128
         return False
     
+    def _check_ref_in2_exists(self):
+        """
+        Check if REF_IN2_ operator exists and is not empty.
+        
+        Returns:
+            bool: True if REF_IN2_ exists and is not empty (128x128)
+        """
+        ref_in2_resized = self.ownerComp.op('REF_IN2_')
+        if ref_in2_resized:
+            width, height = ref_in2_resized.width, ref_in2_resized.height
+            # 128x128 typically means empty in TouchDesigner
+            return width != 128 or height != 128
+        return False
+    
+    def _check_ref_in_exists(self, index):
+        """
+        Generic helper to check if REF_IN{i}_ operator exists and is not empty.
+        
+        Args:
+            index (int): The index of the REF_IN operator (1-7)
+            
+        Returns:
+            bool: True if REF_IN{i}_ exists and is not empty (128x128)
+        """
+        ref_in_resized = self.ownerComp.op(f'REF_IN{index}_')
+        if ref_in_resized:
+            width, height = ref_in_resized.width, ref_in_resized.height
+            # 128x128 typically means empty in TouchDesigner
+            return width != 128 or height != 128
+        return False
+    
     def _encode_image_to_base64(self, ref_image):
         """
         Encode a TouchDesigner TOP operator image to base64 data URI.
@@ -118,11 +150,17 @@ class MediaGenBase(AopUtil):
             # Format as data URI
             data_uri = f'data:image/png;base64,{encoded_image}'
             
+            # Get image dimensions for logging
+            width, height = ref_image.width, ref_image.height
+            size_kb = len(image_bytes) / 1024
+            
             # Clean up temp file
             try:
                 os.unlink(temp_path)
             except:
                 pass
+            
+            self.logger.log(f"Image encoded and prepared: {width}x{height} ({size_kb:.1f} KB, base64 data URI ready)", level='INFO')
             
             return data_uri
             
@@ -215,6 +253,121 @@ class MediaGenBase(AopUtil):
         """Update the Active parameter based on whether there are active tasks."""
         active_tasks_count = self.tdAsyncIO.ext.AsyncIOManager.GetActiveTasksCount()
         self.ownerComp.par.Active = active_tasks_count > 0
+    
+    def _extract_provider_from_model_id(self, model_id):
+        """
+        Extract provider name from model ID.
+        
+        Args:
+            model_id (str): Model identifier
+            
+        Returns:
+            str: Provider name, or None if not found
+        """
+        return extract_provider_from_model_id(model_id)
+    
+    def _get_models_for_provider(self, provider, media_type=None):
+        """
+        Get list of model IDs for a given provider.
+        
+        Args:
+            provider (str): Provider name (e.g., 'Kling', 'Google')
+            media_type (str, optional): 'image' or 'video' to filter by type
+            
+        Returns:
+            list: List of model IDs for the provider
+        """
+        models_dict = get_models_by_provider(provider, media_type)
+        return list(models_dict.keys())
+    
+    def _update_model_menu(self, provider):
+        """
+        Update the Model parameter's menu items based on selected provider.
+        
+        Args:
+            provider (str): Provider name
+        """
+        if not hasattr(self.ownerComp.par, 'Model'):
+            return
+        
+        # Get models for this provider and media type
+        model_ids = self._get_models_for_provider(provider, self.media_type)
+        
+        if not model_ids:
+            # No models found, clear menu
+            self.ownerComp.par.Model.menuNames = []
+            self.ownerComp.par.Model.menuLabels = []
+            self.ownerComp.par.Model = ''
+            return
+        
+        # Sort model IDs for consistent ordering
+        model_ids.sort()
+        
+        # Update menu items
+        self.ownerComp.par.Model.menuNames = model_ids
+        self.ownerComp.par.Model.menuLabels = model_ids
+        
+        # Set to first model if current selection is invalid
+        current_model = self.ownerComp.par.Model.eval()
+        if current_model not in model_ids:
+            self.ownerComp.par.Model = model_ids[0]
+    
+    def _model_requires_reference(self, model_id):
+        """
+        Check if a model requires reference images based on registry.
+        
+        Args:
+            model_id (str): Model identifier
+            
+        Returns:
+            bool: True if model requires reference images, False otherwise
+        """
+        registry = get_registry()
+        model_config = registry.get(model_id)
+        
+        if not model_config:
+            return False
+        
+        detection = model_config.get('detection', {})
+        return detection.get('requires_reference', False)
+    
+    def _model_supports_image_parameter(self, model_id):
+        """
+        Check if a model supports image parameters and whether they are required.
+        
+        Args:
+            model_id (str): Model identifier
+            
+        Returns:
+            tuple: (supports_image, is_required)
+                - supports_image (bool): Whether model supports image parameters
+                - is_required (bool): Whether image is required (defaults to False if not specified)
+        """
+        registry = get_registry()
+        model_config = registry.get(model_id)
+        
+        if not model_config:
+            return (False, False)
+        
+        model_params = model_config.get('parameters', {})
+        
+        # Check for any image parameter
+        image_param_names = ['image_url', 'first_frame_image', 'image_urls']
+        image_param = None
+        for param_name in image_param_names:
+            if param_name in model_params:
+                image_param = model_params[param_name]
+                break
+        
+        if not image_param:
+            return (False, False)
+        
+        # Check if image is required (defaults to False if not specified)
+        is_required = False
+        if isinstance(image_param, dict):
+            is_required = image_param.get('required', False)
+        
+        return (True, is_required)
     
     # Abstract methods to be implemented by subclasses
     def setup_parameters(self):

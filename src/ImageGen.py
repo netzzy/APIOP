@@ -33,6 +33,23 @@ class ImageGen(MediaGenBase):
                             help_text='Indicates if image generation is in progress',
                             order=0)
         
+        # Create Provider parameter (menu with available providers)
+        provider_options = ['Kling', 'Google']
+        self.create_parameter('Provider', 'menu', page='Config',
+                            label='Provider',
+                            menu_items=provider_options,
+                            default='Google',
+                            help_text='Select the AI provider',
+                            order=1)
+        
+        # Create Model parameter (menu, initially empty, populated by Provider callback)
+        self.create_parameter('Model', 'menu', page='Config',
+                            label='Model',
+                            menu_items=[],
+                            default='',
+                            help_text='Select the model (updates based on provider selection)',
+                            order=2)
+        
         # Create Aspect Ratio parameter (menu based on API docs)
         aspect_ratio_options = ['21:9', '1:1', '4:3', '3:2', '2:3', '5:4', '4:5', '3:4', '16:9', '9:16']
         self.create_parameter('Aspectratio', 'menu', page='Config',
@@ -63,29 +80,28 @@ class ImageGen(MediaGenBase):
         self.create_parameter('Clearfiles', 'pulse', page='Config',
                             label='Clear Files',
                             help_text='Clear all entries from SAVED_FILES table')
+        
+        # Initialize model menu based on default provider
+        self.Provider()
 
+    def Provider(self):
+        """
+        Callback method when Provider parameter changes.
+        Updates Model menu items based on selected provider.
+        """
+        provider = self.ownerComp.par.Provider.eval()
+        self._update_model_menu(provider)
+    
     def _detect_model(self):
         """
-        Detect which model to use based on reference image availability.
-        Uses registry-based detection.
+        Get the selected model from the Model parameter.
         
         Returns:
-            str: Model ID from registry
+            str: Model ID from parameter, or None if not set
         """
-        has_reference = self._check_ref_in1_exists()
-        model_id = self.model_detector.detect_from_context(
-            has_reference_image=has_reference,
-            media_type='image',
-            owner_comp=self.ownerComp
-        )
-        
-        # Fallback to default models if detection fails
+        model_id = self.ownerComp.par.Model.eval()
         if not model_id:
-            if has_reference:
-                return 'google/nano-banana-pro-edit'
-            else:
-                return 'google/nano-banana-pro'
-        
+            return None
         return model_id
     
     def _collect_reference_images(self):
@@ -193,6 +209,7 @@ class ImageGen(MediaGenBase):
             # Add image_urls if provided (for editing mode)
             if image_urls and len(image_urls) > 0:
                 payload['image_urls'] = image_urls
+                self.logger.log(f"Reference images prepared and included in request payload: {len(image_urls)} image(s) (image_urls)", level='INFO')
             
             # Truncate prompt for logging (don't log whole prompt)
             prompt_preview = prompt[:50] + '...' if len(prompt) > 50 else prompt
@@ -251,7 +268,7 @@ class ImageGen(MediaGenBase):
         """
         Generate an image using the AIMLAPI asynchronously.
         Can be called from the pulse button (no args) or programmatically (with args).
-        Automatically detects model based on reference image availability.
+        Uses selected model from Model parameter.
         
         Args:
             prompt (str, optional): Text prompt. If None, uses op("PROMPT").text from the PROMPT operator
@@ -261,18 +278,33 @@ class ImageGen(MediaGenBase):
             completion_callback (callable, optional): Callback function that receives the task object
             
         Returns:
-            int: Task ID for tracking the async operation
+            int: Task ID for tracking the async operation, or None if validation fails
         """
         # Use parameters from component if not provided
         if prompt is None:
             # Get prompt from PROMPT operator (uses base class method)
             prompt = self._get_prompt_from_operator()
         
-        # Auto-detect model based on reference images
+        # Get selected model from parameter
         model = self._detect_model()
+        if not model:
+            error_msg = "No model selected. Please select a model from the Model parameter."
+            self.logger.log(error_msg, level='ERROR')
+            return None
         
-        # Collect reference images if available
-        image_urls = self._collect_reference_images()
+        # Check if model supports image parameters
+        supports_image, is_required = self._model_supports_image_parameter(model)
+        
+        # Collect reference images if model supports them (required or optional)
+        image_urls = []
+        if supports_image:
+            image_urls = self._collect_reference_images()
+            if is_required and not image_urls:
+                error_msg = f"Model {model} requires reference images, but none were found. Please provide reference images in REF_IN operators."
+                self.logger.log(error_msg, level='ERROR')
+                return None
+            elif image_urls:
+                self.logger.log(f"Using {len(image_urls)} reference image(s) from REF_IN operators for model {model}", level='INFO')
         
         # Get output directory from global AOP parameter
         if output_dir is None:
@@ -292,7 +324,7 @@ class ImageGen(MediaGenBase):
                 completion_callback(task)
         
         # Create the async coroutine
-        coro = self._generate_image_async(prompt, model, output_dir, aspect_ratio, resolution, image_urls)
+        coro = self._generate_image_async(prompt, model, output_dir, aspect_ratio, resolution, image_urls if image_urls else None)
         
         # Run it through the async manager
         task_id = self.tdAsyncIO.ext.AsyncIOManager.Run(

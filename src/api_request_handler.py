@@ -78,14 +78,16 @@ class APIRequestHandler:
                         return response_data
                     else:
                         error_text = await response.text()
-                        error_msg = f"Error creating generation task: HTTP {response.status}\nResponse: {error_text}"
+                        payload_str = json.dumps(payload, indent=2)
+                        error_msg = f"Error creating generation task: HTTP {response.status}\nRequest Payload: {payload_str}\nResponse: {error_text}"
                         if hasattr(self.logger, 'log'):
                             self.logger.log(error_msg, level='ERROR')
                         else:
                             self.logger(error_msg)
                         return None
         except Exception as e:
-            error_msg = f"Unexpected error creating generation task: {e}"
+            payload_str = json.dumps(payload, indent=2)
+            error_msg = f"Unexpected error creating generation task: {e}\nRequest Payload: {payload_str}"
             if hasattr(self.logger, 'log'):
                 self.logger.log(error_msg, level='ERROR')
             else:
