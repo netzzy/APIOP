@@ -1,30 +1,28 @@
-from AopUtil import AopUtil
+from MediaGenBase import MediaGenBase
+from model_detector import ModelDetector
+from api_request_handler import APIRequestHandler
+from models_registry import get_registry
 import aiohttp
 import json
-import os
 import base64
-import re
 import tempfile
-from datetime import datetime
+import os
 
 
-class ImageGen(AopUtil):
+class ImageGen(MediaGenBase):
 
     def __init__(self, ownerComp):
-        # Initialize parent class first
-        super().__init__(ownerComp)
+        # Initialize parent class first (with media_type='image')
+        super().__init__(ownerComp, media_type='image')
         
-        self.ownerComp = ownerComp 
-        self.logger = op('Logger').ext.Logger if op('Logger') else print # Basic fallback logging
         self.logger.log('ImageGen initialized', level='INFO')
         
-        self.tdAsyncIO = self.ownerComp.op('TDAsyncIO')
+        # Initialize model detector and registry
+        self.registry = get_registry()
+        self.model_detector = ModelDetector(self.registry)
         
         # Setup custom parameters
         self.setup_parameters()
-        
-        # API configuration
-        self.api_url = 'https://api.aimlapi.com/v1/images/generations'
 
     def setup_parameters(self):
         """Create custom parameters for model and image generation settings."""
@@ -69,17 +67,26 @@ class ImageGen(AopUtil):
     def _detect_model(self):
         """
         Detect which model to use based on reference image availability.
+        Uses registry-based detection.
         
         Returns:
-            str: 'google/nano-banana-pro-edit' if reference images found, 
-                 'google/nano-banana-pro' otherwise
+            str: Model ID from registry
         """
-        ref_in1_resized = self.ownerComp.op('REF_IN1_')
-        if ref_in1_resized:
-            width, height = ref_in1_resized.width, ref_in1_resized.height
-            if width != 128 or height != 128:
+        has_reference = self._check_ref_in1_exists()
+        model_id = self.model_detector.detect_from_context(
+            has_reference_image=has_reference,
+            media_type='image',
+            owner_comp=self.ownerComp
+        )
+        
+        # Fallback to default models if detection fails
+        if not model_id:
+            if has_reference:
                 return 'google/nano-banana-pro-edit'
-        return 'google/nano-banana-pro'
+            else:
+                return 'google/nano-banana-pro'
+        
+        return model_id
     
     def _collect_reference_images(self):
         """
@@ -143,100 +150,11 @@ class ImageGen(AopUtil):
         
         return image_urls
 
-    def _generate_filename(self, prompt, output_dir):
-        """
-        Generate filename and filepath using prompt words and node name subfolder.
-        
-        Args:
-            prompt (str): The text prompt
-            output_dir (str): Base output directory
-            
-        Returns:
-            tuple: (filepath, filename) - Full path and filename
-        """
-        # Get first couple of words from prompt (sanitize for filename)
-        words = prompt.split()[:3]  # First 3 words
-        prompt_snippet = '_'.join(words).lower()
-        # Remove invalid filename characters
-        prompt_snippet = re.sub(r'[^\w\s-]', '', prompt_snippet)
-        prompt_snippet = re.sub(r'[-\s]+', '_', prompt_snippet)
-        
-        # Create subfolder with node name
-        node_name = self.ownerComp.name
-        subfolder = os.path.join(output_dir, node_name)
-        os.makedirs(subfolder, exist_ok=True)
-        
-        # Generate filename with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{prompt_snippet}_{timestamp}.png"
-        filepath = os.path.join(subfolder, filename)
-        
-        return filepath, filename
-    
-    def Clearfiles(self):
-        """Pulse callback for Clear Files button - clears SAVED_FILES table and adds empty row."""
-        try:
-            saved_files_table = self.ownerComp.op('SAVED_FILES')
-            if saved_files_table:
-                # Clear all rows from the table
-                saved_files_table.clear()
-                
-                # Add one empty row
-                saved_files_table.appendRow(['../empty.png', ''])
-                
-                # Set Scroll cursor to 0
-                scroll_op = self.ownerComp.op('Scroll')
-                if scroll_op:
-                    scroll_op.par.Cursor = 0
-                    self.logger.log("Set Scroll cursor to 0", level='INFO')
-                
-                self.logger.log("Cleared SAVED_FILES table and added empty row", level='INFO')
-                
-                # Clear logs like Logger.clearlog pulse
-                logger_op = op('Logger')
-                if logger_op and hasattr(logger_op.ext.Logger, 'Clearlog'):
-                    logger_op.ext.Logger.Clearlog()
-            else:
-                self.logger.log("SAVED_FILES table operator not found", level='WARNING')
-        except Exception as e:
-            self.logger.log(f"Error clearing SAVED_FILES table: {e}", level='ERROR')
-    
-    def _add_to_saved_files_table(self, filepath, prompt):
-        """
-        Add a row to the SAVED_FILES table with filename and prompt.
-        
-        Args:
-            filepath (str): Full path to the generated image file
-            prompt (str): The prompt used to generate the image
-        """
-        try:
-            saved_files_table = self.ownerComp.op('SAVED_FILES')
-            if saved_files_table:
-                # Get just the filename from the full path
-                filename = os.path.basename(filepath)
-                
-                # Ensure table has headers if it's empty
-                if saved_files_table.numRows == 0:
-                    saved_files_table.appendRow(['filename', 'prompt'])
-                
-                # Insert new row with filename and prompt
-                saved_files_table.appendRow([filename, prompt])
-                self.logger.log(f"Added to SAVED_FILES table: {filename}", level='INFO')
-                
-                # Set Scroll cursor to the last row (newly added row)
-                scroll_op = self.ownerComp.op('Scroll')
-                if scroll_op:
-                    last_row_index = saved_files_table.numRows - 1
-                    scroll_op.par.Cursor = last_row_index
-                    self.logger.log(f"Set Scroll cursor to row {last_row_index}", level='INFO')
-            else:
-                self.logger.log("SAVED_FILES table operator not found", level='WARNING')
-        except Exception as e:
-            self.logger.log(f"Error adding to SAVED_FILES table: {e}", level='ERROR')
 
     async def _generate_image_async(self, prompt, model, output_dir, aspect_ratio, resolution, image_urls=None):
         """
         Async method to generate an image from the AIMLAPI.
+        Uses API request handler for unified request handling.
         
         Args:
             prompt (str): The text prompt for image generation
@@ -253,7 +171,17 @@ class ImageGen(AopUtil):
             # Get API key from AOP
             api_key = op.AOP.Getkey('aimlapi')
             
-            # Define the payload
+            # Get model configuration from registry
+            model_config = self.registry.get(model)
+            if not model_config:
+                error_msg = f"Model {model} not found in registry"
+                self.logger.log(error_msg, level='ERROR')
+                return None
+            
+            # Initialize API request handler
+            api_handler = APIRequestHandler(api_key, self.logger)
+            
+            # Build payload from model config and parameters
             payload = {
                 'model': model,
                 'prompt': prompt,
@@ -266,82 +194,53 @@ class ImageGen(AopUtil):
             if image_urls and len(image_urls) > 0:
                 payload['image_urls'] = image_urls
             
-            # Set the headers
-            headers = {
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json'
-            }
-            
             # Truncate prompt for logging (don't log whole prompt)
             prompt_preview = prompt[:50] + '...' if len(prompt) > 50 else prompt
             self.logger.log(f"Generating image with prompt: '{prompt_preview}'", level='INFO')
             self.logger.log(f"Using model: {model}", level='INFO')
             
-            # Make the async POST request
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, headers=headers, json=payload) as response:
-                    # Check if the request was successful
-                    if response.status == 200:
-                        response_data = await response.json()
-                        
-                        # Handle different response formats
-                        if 'data' in response_data and len(response_data['data']) > 0:
-                            image_data = response_data['data'][0]
-                            
-                            # Generate filename and filepath using prompt and node name
-                            filepath, filename = self._generate_filename(prompt, output_dir)
-                            
-                            # Check if response contains a URL or base64 data
-                            if 'url' in image_data:
-                                # Download image from URL
-                                image_url = image_data['url']
-                                self.logger.log(f"Downloading image from URL: {image_url}", level='INFO')
-                                
-                                async with session.get(image_url) as img_response:
-                                    if img_response.status == 200:
-                                        image_bytes = await img_response.read()
-                                        
-                                        # Save the image
-                                        with open(filepath, 'wb') as f:
-                                            f.write(image_bytes)
-                                        self.logger.log(f"Image saved successfully to: {filepath}", level='INFO')
-                                        
-                                        # Add to SAVED_FILES table
-                                        self._add_to_saved_files_table(filepath, prompt)
-                                        
-                                        return filepath
-                                    else:
-                                        error_msg = f"Error downloading image: {img_response.status}"
-                                        self.logger.log(error_msg, level='ERROR')
-                                        return None
-                                        
-                            elif 'b64_json' in image_data:
-                                # Handle base64 encoded image
-                                image_data_b64 = image_data['b64_json']
-                                image_bytes = base64.b64decode(image_data_b64)
-                                
-                                # Save the image
-                                with open(filepath, 'wb') as f:
-                                    f.write(image_bytes)
-                                self.logger.log(f"Image saved successfully to: {filepath}", level='INFO')
-                                
-                                # Add to SAVED_FILES table
-                                self._add_to_saved_files_table(filepath, prompt)
-                                
-                                return filepath
-                            else:
-                                error_msg = "Unexpected response format. Response data: " + json.dumps(response_data, indent=2)
-                                self.logger.log(error_msg, level='ERROR')
-                                return None
+            # Create generation task (immediate response for images)
+            response_data = await api_handler.create_generation_task(model_config, payload)
+            
+            if not response_data:
+                return None
+            
+            # Handle response (immediate for images)
+            if 'data' in response_data and len(response_data['data']) > 0:
+                image_data = response_data['data'][0]
+                
+                # Generate filename and filepath using prompt and node name
+                filepath, filename = self._generate_filename(prompt, output_dir, file_extension='.png')
+                
+                # Extract media URL or base64 data
+                media_url = api_handler.extract_media_url(response_data, media_type='image')
+                
+                if media_url:
+                    # Check if it's a URL or base64
+                    if media_url.startswith('http'):
+                        # Download from URL
+                        success = await api_handler.download_media(media_url, filepath)
+                        if success:
+                            self._add_to_saved_files_table(filepath, prompt)
+                            return filepath
                         else:
-                            error_msg = "No image data in response. Full response: " + json.dumps(response_data, indent=2)
-                            self.logger.log(error_msg, level='ERROR')
                             return None
                     else:
-                        error_text = await response.text()
-                        error_msg = f"Error: HTTP {response.status}\nResponse: {error_text}"
-                        self.logger.log(error_msg, level='ERROR')
-                        return None
+                        # Base64 encoded
+                        image_bytes = base64.b64decode(media_url)
+                        with open(filepath, 'wb') as f:
+                            f.write(image_bytes)
+                        self.logger.log(f"Image saved successfully to: {filepath}", level='INFO')
+                        self._add_to_saved_files_table(filepath, prompt)
+                        return filepath
+                else:
+                    error_msg = "Unexpected response format. Response data: " + json.dumps(response_data, indent=2)
+                    self.logger.log(error_msg, level='ERROR')
+                    return None
+            else:
+                error_msg = "No image data in response. Full response: " + json.dumps(response_data, indent=2)
+                self.logger.log(error_msg, level='ERROR')
+                return None
                         
         except Exception as e:
             error_msg = f"Unexpected error during image generation: {e}"
@@ -366,14 +265,8 @@ class ImageGen(AopUtil):
         """
         # Use parameters from component if not provided
         if prompt is None:
-            # Get prompt from PROMPT operator (text DAT)
-            prompt_op = self.ownerComp.op('PROMPT')
-            if prompt_op:
-                prompt = prompt_op.text
-            else:
-                error_msg = "PROMPT operator not found. Please provide a prompt argument or create a PROMPT operator."
-                self.logger.log(error_msg, level='ERROR')
-                raise ValueError(error_msg)
+            # Get prompt from PROMPT operator (uses base class method)
+            prompt = self._get_prompt_from_operator()
         
         # Auto-detect model based on reference images
         model = self._detect_model()
@@ -411,22 +304,5 @@ class ImageGen(AopUtil):
         
         return task_id
     
-    def Stopgeneration(self):
-        """Pulse callback for Stop Generation button - cancels all active generation tasks."""
-        try:
-            # Cancel all active tasks
-            self.tdAsyncIO.ext.AsyncIOManager.Cancelactive()
-            
-            # Update Active status to False
-            self.ownerComp.par.Active = False
-            
-            self.logger.log("Stopped all active image generation tasks", level='INFO')
-        except Exception as e:
-            self.logger.log(f"Error stopping generation tasks: {e}", level='ERROR')
-    
-    def _update_active_status(self):
-        """Update the Active parameter based on whether there are active tasks."""
-        active_tasks_count = self.tdAsyncIO.ext.AsyncIOManager.GetActiveTasksCount()
-        self.ownerComp.par.Active = active_tasks_count > 0
         
         

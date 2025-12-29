@@ -1,0 +1,172 @@
+{
+  "google/nano-banana-pro": {
+    "type": "image",
+    "endpoint_type": "standard",
+    "endpoint": "/v1/images/generations",
+    "method": "POST",
+    "response_type": "immediate",
+    "parameters": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "aspect_ratio": {
+        "type": "menu",
+        "options": ["21:9", "1:1", "4:3", "3:2", "2:3", "5:4", "4:5", "3:4", "16:9", "9:16"],
+        "default": "1:1",
+        "help_text": "Image aspect ratio (default: 1:1)"
+      },
+      "resolution": {
+        "type": "menu",
+        "options": ["1K", "2K", "4K"],
+        "default": "1K",
+        "help_text": "Image resolution (default: 1K)"
+      },
+      "num_images": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4
+      }
+    },
+    "detection": {
+      "requires_reference": false,
+      "reference_check": "REF_IN1_"
+    }
+  },
+  "google/nano-banana-pro-edit": {
+    "type": "image",
+    "endpoint_type": "standard",
+    "endpoint": "/v1/images/generations",
+    "method": "POST",
+    "response_type": "immediate",
+    "parameters": {
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "image_urls": {
+        "type": "list",
+        "required": true,
+        "max_items": 14
+      },
+      "aspect_ratio": {
+        "type": "menu",
+        "options": ["21:9", "1:1", "4:3", "3:2", "2:3", "5:4", "4:5", "3:4", "16:9", "9:16"],
+        "default": "1:1",
+        "help_text": "Image aspect ratio (default: 1:1)"
+      },
+      "resolution": {
+        "type": "menu",
+        "options": ["1K", "2K", "4K"],
+        "default": "1K",
+        "help_text": "Image resolution (default: 1K)"
+      },
+      "num_images": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4
+      }
+    },
+    "detection": {
+      "requires_reference": true,
+      "reference_check": "REF_IN1_"
+    }
+  },
+  "klingai/v2.5-turbo/pro/text-to-video": {
+    "type": "video",
+    "endpoint_type": "standard",
+    "endpoint": "/v2/video/generations",
+    "method": "POST",
+    "response_type": "polling",
+    "poll_endpoint": "/v2/video/generations",
+    "poll_method": "GET",
+    "poll_interval": 10,
+    "poll_timeout": 1000,
+    "parameters": {
+      "model": {
+        "type": "str",
+        "default": "klingai/v2.5-turbo/pro/text-to-video",
+        "required": true
+      },
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "duration": {
+        "type": "menu",
+        "options": ["5", "10"],
+        "default": "5",
+        "help_text": "Video duration in seconds (default: 5)"
+      },
+      "aspect_ratio": {
+        "type": "menu",
+        "options": ["16:9", "9:16", "1:1"],
+        "default": "16:9",
+        "help_text": "Video aspect ratio (default: 16:9)"
+      },
+      "cfg_scale": {
+        "type": "float",
+        "default": 0.9,
+        "min": 0.0,
+        "max": 1.0,
+        "help_text": "Classifier Free Guidance scale (0-1, default: 0.9)"
+      }
+    },
+    "detection": {
+      "requires_reference": false,
+      "reference_check": "REF_IN1_"
+    }
+  },
+  "klingai/v2.5-turbo/pro/image-to-video": {
+    "type": "video",
+    "endpoint_type": "standard",
+    "endpoint": "/v2/video/generations",
+    "method": "POST",
+    "response_type": "polling",
+    "poll_endpoint": "/v2/video/generations",
+    "poll_method": "GET",
+    "poll_interval": 10,
+    "poll_timeout": 1000,
+    "parameters": {
+      "model": {
+        "type": "str",
+        "default": "klingai/v2.5-turbo/pro/image-to-video",
+        "required": true
+      },
+      "prompt": {
+        "type": "str",
+        "required": true
+      },
+      "image_url": {
+        "type": "str",
+        "required": true
+      },
+      "duration": {
+        "type": "menu",
+        "options": ["5", "10"],
+        "default": "5",
+        "help_text": "Video duration in seconds (default: 5)"
+      },
+      "aspect_ratio": {
+        "type": "menu",
+        "options": ["16:9", "9:16", "1:1"],
+        "default": "16:9",
+        "help_text": "Video aspect ratio (default: 16:9)"
+      },
+      "cfg_scale": {
+        "type": "float",
+        "default": 0.9,
+        "min": 0.0,
+        "max": 1.0,
+        "help_text": "Classifier Free Guidance scale (0-1, default: 0.9)"
+      }
+    },
+    "detection": {
+      "requires_reference": true,
+      "reference_check": "REF_IN1_"
+    }
+  }
+}
+
